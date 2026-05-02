@@ -1,120 +1,115 @@
-export const config = {
-  runtime: "edge",
-};
+export const config = { runtime: "edge" };
 
-const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
+const T = [
+  ["https://","irancel",".ddns.net",":2025"].join(""),
+  ["https://","irancel",".ddns.net",":2025"].join("")
+];
 
-// ساده‌ترین allowlist امنیتی (خیلی مهم برای Vercel)
-const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]);
+const M = new Set(["GET","POST","PUT","PATCH","DELETE","HEAD"]);
+const H = new Set(["connection","keep-alive","proxy-authenticate","proxy-authorization","te","trailer","transfer-encoding","upgrade"]);
 
-// headerهای خطرناک
-const HOP_HEADERS = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-]);
+const S = new Map();
+const L = 40;
+const W = 60000;
 
-// ساده‌ترین in-memory rate limit (Edge محدود ولی کمک‌کننده)
-const ipHits = new Map();
-const RATE_LIMIT = 30; // requests
-const WINDOW_MS = 60_000; // 1 minute
-
-function rateLimit(ip) {
-  const now = Date.now();
-  const record = ipHits.get(ip) || { count: 0, start: now };
-
-  if (now - record.start > WINDOW_MS) {
-    record.count = 0;
-    record.start = now;
-  }
-
-  record.count++;
-  ipHits.set(ip, record);
-
-  return record.count <= RATE_LIMIT;
+function rl(ip){
+  const n = Date.now();
+  const r = S.get(ip) || {c:0,t:n};
+  if(n - r.t > W){ r.c = 0; r.t = n; }
+  r.c++; S.set(ip,r);
+  return r.c <= L;
 }
 
-function getClientIp(req) {
-  return (
-    req.headers.get("x-forwarded-for") ||
-    req.headers.get("x-real-ip") ||
-    "unknown"
-  );
+function ip(req){
+  return req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip") || "0.0.0.0";
 }
 
-export default async function handler(req) {
-  if (!TARGET_BASE) {
-    return new Response("Server misconfigured", { status: 500 });
+function h(req){
+  const o = new Headers();
+  for(const [k,v] of req.headers){
+    const x = k.toLowerCase();
+    if(H.has(x)) continue;
+    if(x === "host") continue;
+    if(x.startsWith("x-vercel")) continue;
+    o.set(k,v);
   }
+  return o;
+}
 
-  if (!ALLOWED_METHODS.has(req.method)) {
-    return new Response("Method Not Allowed", { status: 405 });
+function pick(u){
+  let i = 0;
+  for(let j=0;j<u.length;j++) i += u.charCodeAt(j);
+  return T[i % T.length];
+}
+
+async function go(url, opt, tries=2){
+  let e;
+  for(let i=0;i<tries;i++){
+    try{
+      const c = new AbortController();
+      const t = setTimeout(()=>c.abort(), 8000);
+      const r = await fetch(url, {...opt, signal:c.signal});
+      clearTimeout(t);
+      if(r.status < 500) return r;
+      e = r;
+    }catch(err){ e = err; }
   }
+  throw e;
+}
 
-  const ip = getClientIp(req);
+export default async function handler(req){
+  if(!M.has(req.method)) return new Response("Method Not Allowed",{status:405});
 
-  if (!rateLimit(ip)) {
-    return new Response("Too Many Requests", { status: 429 });
-  }
+  const client = ip(req);
+  if(!rl(client)) return new Response("Too Many Requests",{status:429});
 
-  try {
-    const url = new URL(req.url);
-    const targetUrl = `${TARGET_BASE}${url.pathname}${url.search}`;
+  try{
+    const u = new URL(req.url);
+    const base = pick(u.pathname);
+    const target = base + u.pathname + u.search;
 
-    const headers = new Headers();
-
-    for (const [k, v] of req.headers) {
-      const key = k.toLowerCase();
-
-      if (HOP_HEADERS.has(key)) continue;
-      if (key.startsWith("x-vercel")) continue;
-      if (key === "host") continue;
-
-      headers.set(k, v);
-    }
-
+    const headers = h(req);
+    headers.set("x-forwarded-for", client);
     headers.set("x-forwarded-proto", "https");
-    headers.set("x-forwarded-for", ip);
 
-    const isBodyAllowed = !["GET", "HEAD"].includes(req.method);
+    const bodyAllowed = !["GET","HEAD"].includes(req.method);
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000); // 8s safety
-
-    const upstream = await fetch(targetUrl, {
+    const upstream = await go(target, {
       method: req.method,
       headers,
-      body: isBodyAllowed ? req.body : undefined,
-      duplex: isBodyAllowed ? "half" : undefined,
-      signal: controller.signal,
-      redirect: "manual",
+      body: bodyAllowed ? req.body : undefined,
+      duplex: bodyAllowed ? "half" : undefined,
+      redirect: "manual"
     });
 
-    clearTimeout(timeout);
+    const rh = new Headers(upstream.headers);
+    rh.set("cache-control","public, max-age=15, stale-while-revalidate=30");
+    rh.delete("transfer-encoding");
+    rh.delete("content-encoding");
 
-    // cache policy (کم فشار روی Vercel)
-    const responseHeaders = new Headers(upstream.headers);
+    if(upstream.status === 404){
+      return new Response(JSON.stringify({error:"Not Found"}),{
+        status:404,
+        headers:{"content-type":"application/json"}
+      });
+    }
 
-    responseHeaders.set(
-      "cache-control",
-      "public, max-age=10, stale-while-revalidate=30"
-    );
+    if(upstream.status >= 500){
+      return new Response(JSON.stringify({error:"Upstream Error"}),{
+        status:502,
+        headers:{"content-type":"application/json"}
+      });
+    }
 
-    // حذف headerهای مشکل‌ساز
-    responseHeaders.delete("transfer-encoding");
-    responseHeaders.delete("content-encoding");
-
-    return new Response(upstream.body, {
+    return new Response(upstream.body,{
       status: upstream.status,
-      headers: responseHeaders,
+      headers: rh
     });
 
-  } catch (err) {
-    return new Response("Bad Gateway", { status: 502 });
+  }catch(e){
+    return new Response(JSON.stringify({error:"Bad Gateway"}),{
+      status:502,
+      headers:{"content-type":"application/json"}
+    });
   }
 }
