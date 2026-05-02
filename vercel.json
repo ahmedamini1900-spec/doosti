@@ -2,10 +2,7 @@
   "version": 2,
   "name": "doosti",
   "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/api/index"
-    }
+    { "source": "/(.*)", "destination": "/api/index" }
   ],
   "functions": {
     "api/index.js": {
