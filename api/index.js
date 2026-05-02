@@ -1,12 +1,17 @@
 export const config = { runtime: "edge" };
 
 const T = [
-  ["https://","irancel",".ddns.net",":2025"].join(""),
   ["https://","irancel",".ddns.net",":2025"].join("")
 ];
 
+const FIXED_PATH = "/oliv";
+
 const M = new Set(["GET","POST","PUT","PATCH","DELETE","HEAD"]);
-const H = new Set(["connection","keep-alive","proxy-authenticate","proxy-authorization","te","trailer","transfer-encoding","upgrade"]);
+
+const H = new Set([
+  "connection","keep-alive","proxy-authenticate","proxy-authorization",
+  "te","trailer","transfer-encoding","upgrade"
+]);
 
 const S = new Map();
 const L = 40;
@@ -21,60 +26,64 @@ function rl(ip){
 }
 
 function ip(req){
-  return req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip") || "0.0.0.0";
+  return req.headers.get("x-forwarded-for") ||
+         req.headers.get("x-real-ip") ||
+         "0.0.0.0";
 }
 
-function h(req){
+function cleanHeaders(req){
   const o = new Headers();
   for(const [k,v] of req.headers){
     const x = k.toLowerCase();
     if(H.has(x)) continue;
-    if(x === "host") continue;
     if(x.startsWith("x-vercel")) continue;
+    if(x === "host") continue;
     o.set(k,v);
   }
   return o;
 }
 
-function pick(u){
-  let i = 0;
-  for(let j=0;j<u.length;j++) i += u.charCodeAt(j);
-  return T[i % T.length];
-}
+async function go(url, opt){
+  const c = new AbortController();
+  const t = setTimeout(()=>c.abort(), 8000);
 
-async function go(url, opt, tries=2){
-  let e;
-  for(let i=0;i<tries;i++){
-    try{
-      const c = new AbortController();
-      const t = setTimeout(()=>c.abort(), 8000);
-      const r = await fetch(url, {...opt, signal:c.signal});
-      clearTimeout(t);
-      if(r.status < 500) return r;
-      e = r;
-    }catch(err){ e = err; }
+  try{
+    const r = await fetch(url, {...opt, signal:c.signal});
+    clearTimeout(t);
+    return r;
+  }catch(e){
+    clearTimeout(t);
+    throw e;
   }
-  throw e;
 }
 
 export default async function handler(req){
-  if(!M.has(req.method)) return new Response("Method Not Allowed",{status:405});
+
+  if(!M.has(req.method)){
+    return new Response("Method Not Allowed",{status:405});
+  }
 
   const client = ip(req);
-  if(!rl(client)) return new Response("Too Many Requests",{status:429});
+
+  if(!rl(client)){
+    return new Response("Too Many Requests",{status:429});
+  }
 
   try{
     const u = new URL(req.url);
-    const base = pick(u.pathname);
-    const target = base + u.pathname + u.search;
+    const base = T[0];
 
-    const headers = h(req);
+    const target = base + FIXED_PATH + u.search;
+
+    const headers = cleanHeaders(req);
+
+    headers.set("host","irancel.ddns.net");
     headers.set("x-forwarded-for", client);
     headers.set("x-forwarded-proto", "https");
 
     const bodyAllowed = !["GET","HEAD"].includes(req.method);
 
-    const upstream = await go(target, {
+    const upstream = await go(target,{
       method: req.method,
       headers,
       body: bodyAllowed ? req.body : undefined,
@@ -83,23 +92,11 @@ export default async function handler(req){
     });
 
     const rh = new Headers(upstream.headers);
-    rh.set("cache-control","public, max-age=15, stale-while-revalidate=30");
+
+    rh.set("cache-control","public, max-age=10, stale-while-revalidate=20");
+
     rh.delete("transfer-encoding");
     rh.delete("content-encoding");
-
-    if(upstream.status === 404){
-      return new Response(JSON.stringify({error:"Not Found"}),{
-        status:404,
-        headers:{"content-type":"application/json"}
-      });
-    }
-
-    if(upstream.status >= 500){
-      return new Response(JSON.stringify({error:"Upstream Error"}),{
-        status:502,
-        headers:{"content-type":"application/json"}
-      });
-    }
 
     return new Response(upstream.body,{
       status: upstream.status,
@@ -107,9 +104,6 @@ export default async function handler(req){
     });
 
   }catch(e){
-    return new Response(JSON.stringify({error:"Bad Gateway"}),{
-      status:502,
-      headers:{"content-type":"application/json"}
-    });
+    return new Response("Bad Gateway",{status:502});
   }
 }
