@@ -1,7 +1,6 @@
 {
   "name": "doosti",
   "version": "1.0.0",
-  "description": "Vercel Pro-safe Edge",
   "private": true,
   "license": "MIT"
 }
